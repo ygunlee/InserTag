@@ -1,0 +1,78 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+
+my $pairfile;
+my $divide=0;
+my $prefix="temp";
+
+GetOptions(
+	'in|i=s' => \$pairfile,
+	'divide|d' => \$divide,
+	'prefix|p=s' => \$prefix
+);
+
+open(PAIR,$pairfile);
+
+if($divide){
+	open(LEFT,">$prefix.1.fa");
+	open(RIGHT,">$prefix.2.fa");
+	open(SUMMARY,">$prefix.summary");
+}else{
+	open(OUT,">$prefix.fa");
+}
+
+my $count=1;
+while(<PAIR>){
+	my $line=$_;
+	chomp $line;
+	my @line=split(/\t/,$line);
+	if($line=~/^#/){next;}
+	my $left=$line[1];
+	my $right=$line[10];
+	$line[17]=~/PAIRGAP=(-?\d+)/;
+	my $gap=$1;
+	$line[17]=~/PAIRTYPE=(\w+)/;
+	my $align=$1;
+	my $size=0;
+	if($line[17]=~/SEGSIZE=(\d+)/){
+		$size=$1;
+	}
+	$line[7]=~/TAGLEN=(\d+)/;
+	my $leftsize=$1;
+	$line[7]=~/OVERH=(\d+)/;
+	my $leftnum=$1;
+	$line[14]=~/TAGLEN=(\d+)/;
+	my $rightsize=$1;
+	$line[14]=~/OVERH=(\d+)/;
+	my $rightnum=$1;
+	my $sample=$line[8];
+	my $id=$count."_".$sample;
+	
+	if($left>$right){$left=$line[10];$right=$line[1];}
+	$line[7]=~/BRK=(\d+)/;
+	my $leftbrk=$1;
+	my $lefttag=substr($line[9],$leftbrk,length($line[9])-$leftbrk);
+	$line[14]=~/BRK=(\d+)/;
+	my $rightbrk=$1;
+	my $righttag=substr($line[16],0,$rightbrk);
+
+	if($divide){
+		print LEFT ">",$id,"_LEFT_",length($lefttag),"_",length($righttag),"\n";
+		print LEFT $lefttag,"\n";
+		print RIGHT ">",$id,"_RIGHT_",length($righttag),"_",length($lefttag),"\n";
+		print RIGHT $righttag,"\n";
+		my @join=($line[0],$left,$right,0,0,$id,$gap,$align,$size,$leftsize,$rightsize,$leftnum,$rightnum,$line[18]);
+		#my @join=($line[0],$left,$right,0,0,$id,$gap,$align,$size,$leftsize,$rightsize,$leftnum,$rightnum);
+		print SUMMARY join("\t",@join),"\n";
+	}else{
+		print OUT ">",$line[8],"_",$line[0],"_",$left,"_",$right,"_LEFT_",length($lefttag),"\n";
+		print OUT $lefttag,"\n";
+		print OUT ">",$line[8],"_",$line[0],"_",$left,"_",$right,"_RIGHT_",length($righttag),"\n";
+		print OUT $righttag,"\n";
+	}
+	$count++;
+}

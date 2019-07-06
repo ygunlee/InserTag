@@ -1,0 +1,56 @@
+#!/usr/bin/perl
+use strict;
+use warnings; 
+use Getopt::Long;
+my $id;
+#my %chimp; my %orang; my %grch; my %huref; my %chm;
+our %holder;
+GetOptions('i|id=s' => \$id);
+
+if(-e "$id.chimp.trace"){
+	holdtrace($id,"chimp");
+}
+if(-e "$id.orang.trace"){
+	holdtrace($id,"orang");
+}
+if(-e "$id.grch38.trace"){
+	holdtrace($id,"grch38");
+}
+if(-e "$id.huref.trace"){
+	holdtrace($id,"huref");
+}
+if(-e "$id.chm1.trace"){
+	holdtrace($id,"chm1");
+}
+open(SUM,"$id.summary");
+while(<SUM>){
+	my $l=$_; chomp $l;
+	my @l=split(/\t/,$l);
+	my @i=split(/_/,$l[5]);
+	my $p;
+	if($holder{$i[0]}){
+		foreach my $key (sort keys %{$holder{$i[0]}}){
+			$p.=$holder{$i[0]}{$key};
+			$p.=";";
+		}
+	}else{
+		$p="none";
+	}
+	print $l,"\t",$p,"\n";
+}
+
+
+sub holdtrace{
+	my ($sample,$ref)=@_;
+	open (IN,"$sample.$ref.trace");
+	while(<IN>){
+		my $line=$_;chomp $line;
+		my @line=split(/\t/,$line);
+		my $left=$line[5];
+		my $right=$line[10];
+		if($left>$right){$left=$line[9];$right=$line[6];}
+		my @info=($ref,$line[4],$left,$right,$line[12]);
+		my $prt=join(":",@info);
+		$holder{$line[0]}{$ref}=$prt;
+	}
+}

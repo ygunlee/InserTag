@@ -1,0 +1,167 @@
+#!/usr/bin/perl
+#A perl script to convert InserTag tag file into a vcf file 
+#Author: Younggun Lee 
+#Date: 04/06/2017 
+
+use warnings;
+use strict;
+use lib "$ENV{HOME}/insertag";
+use Getopt::Long;
+use Bio::SeqIO;
+use Bio::Seq;
+use Time::Piece;
+
+my $in;
+my $out;
+my $localcall=0;
+my $break_distance=100;
+my $help=0;
+my $sample_name="SAMPLE";
+my $current_date=localtime->strftime('%m/%d/%Y');
+
+GetOptions(
+	'input|i=s' => \$in,
+	'output|o=s' => \$out,
+	'sample|s=s' => \$sample_name,
+	'local|l' => \$localcall,
+	'distance|d=f' => \$break_distance,
+	'help|h' => \$help
+);
+
+if($help==1){
+	print "\nDesc: Convert InserTag tag file into a vcf format\n";
+	print "Usage: callVCF -i <insertag.call> -o <insertag.vcf> \n";
+	print "Optional: -s <sample name> (default: SAMPLE) \n";
+	print "Optional: -d <maximum distance between breakpoints> (default:100)\n";
+	print "Author: Younggun Lee (yglee08\@gmail.com)\n";
+	print "Date: 04/06/2017\n\n";
+	exit(1);
+}
+
+if(!defined($in) || !defined($out)){
+	print "\nUsage: callVCF -i <insertag.call> -o <insertag.vcf>\n";
+	print "Help: callVCF -h\n\n";
+	exit(1);
+}
+
+my $header1="##fileformat=VCFv4.1\n##fileDate=$current_date\n##source=InserTag\n";
+my $header3="##options: distance = $break_distance\n";
+my $header2="#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tTAG\n";
+
+my $info1="##INFO=<ID=SVTYPE,Number=1,Type=String,Description=\"Type of structural variant\">\n";
+my $info2="##INFO=<ID=TAGLEN,Number=1,Type=Integer,Description=\"Length of Tag\">\n";
+my $info3="##INFO=<ID=TAGMQ,Number=1,Type=Integer,Description=\"Mapping qulaity of anchored portion of Tag\">\n";
+my $info4="##INFO=<ID=OVERH,Number=1,Type=Integer,Description=\"Number of overhang reads in contig\">\n";
+my $info5="##INFO=<ID=ANCHOR,Number=1,Type=Integer,Description=\"Number of anchorage reads in contig\">\n";
+my $info6="##INFO=<ID=UNMAPPED,Number=1,Type=Integer,Description=\"Number of unammped PE reads\">\n";
+my $info7="##INFO=<ID=INTRA,Number=1,Type=Integer,Description=\"Number of intra-chromosome PE reads\">\n";
+my $info8="##INFO=<ID=INTER,Number=1,Type=Integer,Description=\"Number of inter-chromosome PE reads\">\n";
+my $info9="##INFO=<ID=CONTIGLEN,Number=1,Type=Integer,Description=\"Length of pre-masked contigs\">\n";
+my $info10="##INFO=<ID=BRK,Number=1,Type=Integer,Description=\"1-based location of breakpoint in contigs\">\n";
+my $info11="##INFO=<ID=,Number=,Type=,Description=\"distance between two breakpoints (alignment-anchorage)\">\n";
+
+my $filter1="##FILTER=<ID=LEFT_F,Description=\"Anchored to left flanking of the breakpoint\">\n";
+my $filter2="##FILTER=<ID=RIGHT_F,Description=\"Anchored to right flanking of the breakpoint\">\n";
+my $filter3="##FILTER=<ID=NONPASS,Description=\"Disoriented masking\">\n";
+my $filter4="##FILTER=<ID=UNLINKED,Description=\"Not anchored to the reference\">\n";
+
+my $alt1="##ALT=<ID=INS,Description=\"Insertion\">\n";
+
+my $format1="##FORMAT=<ID=TAG,Number=1,Type=String,Description=\"Tag sequence\">\n";
+#my $format2="##FORMAT=<ID=,Number=,Type=,Description=\"\">\n";
+#my $format3="##FORMAT=<ID=,Number=,Type=,Description=\"\">\n";
+#my $format4="##FORMAT=<ID=,Number=,Type=,Description=\"\">\n";
+
+open(IN,"<$in") || die print "Can't open file $in\n";
+print "############################################\n";
+print "Opening $in ... \n";
+open(OUT,">$out") || die print "Can't open file $out\n";
+print "Opening $out ... \n";
+print "Processing... \n";
+
+my $line_cnt=0;
+my $call_cnt=0;
+my $no_cnt=0;
+
+print OUT $header1,$header3;
+print OUT $info1,$info2,$info3,$info4,$info5,$info6,$info7,$info8,$info9;
+print OUT $filter1,$filter2,$filter3,$filter4;
+print OUT $alt1;
+print OUT $format1;
+print OUT "$header2";
+
+
+my @exp=("SVTYPE=","TAGLEN=","TAGMQ=","OVERH=","ANCHOR=","UNMAPPED=","INTRA=","INTER=","CONTIGLEN=","BRK=",
+	"BRKDIST=");
+while(<IN>){
+	chomp $_;
+	$line_cnt++;
+	my @tag=split(/\t/,$_);
+	my $chr=$tag[0];
+	my $str=$tag[3];
+	my $contig=$tag[14];
+	my $brk=$tag[20];
+	if ($brk == 0){
+		$no_cnt++;
+		next;
+	}
+	my $brk1=$tag[19];
+	my $brkd=abs($brk1-$brk);
+	if($brkd >= $break_distance){
+		$no_cnt++;
+		next;
+	}
+	my $lmask=$tag[21]; #local masking
+	$lmask=~/(\D*)(1+)(\D*)/g;
+	my $leftflank=$1;
+	my $masked=$2;
+	my $rightflank=$3;
+	my $brkcontig=0;
+	my $taglength=0;
+	if($str==1){
+		$brkcontig=$-[3];
+		$taglength=length($rightflank);
+	}else{
+		$brkcontig=$+[1];
+		$taglength=length($leftflank);
+	}
+	#print length ($lmask),"\t",$lmask,"\n";
+	#print length ($rightflank),"\t",$rightflank,"\n";
+	#print length ($masked),"\t",$masked,"\n";
+	#print length ($leftflank),"\t",$leftflank,"\n";
+	#print $brkcontig,"\t",$taglength,"\n";
+	#print $lmask,"\n",$rightflank,"\n",$brkcontig,"\n",$masked,"\n",$leftflank,"\n";
+	#print substr($contig,$brkcontig+1,$tag[13]-$brkcontig-1),"\n";
+	#print $tag[13]-$brkcontig,"\n";
+	#if($localcall==1 && $tag[20] != 0){$brk=$tag[20];}
+	my $ID=$tag[17];
+	my $ref=".";
+	my $alt="<INS>";
+	my $qual=int($tag[4]);
+	my $filter;
+	if($tag[18]==1 && $str==1){$filter="LEFT_F";}
+	elsif($tag[18]==1 && $str==-1){$filter="RIGHT_F";}
+	elsif($tag[18]==0){$filter="NONPASS";}
+	elsif($tag[18]==2){$filter="UNLINKED";}
+	my @info=("INS",$tag[23],int($tag[4]),$tag[6],$tag[7],$tag[8],$tag[9],$tag[10],$tag[13],$brkcontig,
+		$brk-$brk1
+	);
+	my $string;
+	for my $i (0 .. 10){
+		$string.=$exp[$i];
+		$string.=$info[$i];
+		$string.=";"
+	}
+	chop $str;
+	my $format=$sample_name;
+	print OUT join("\t",$chr,$brk,$ID,$ref,$alt,$qual,$filter,$string,$format,$contig),"\n";
+	#print join("\t",$chr,$brk,$ID,$ref,$alt,$qual,$filter,$string,$format,$contig),"\n";
+	$call_cnt++;
+}
+
+close (IN);
+close (OUT);
+print "File converted\n";
+print "Input tags: $line_cnt \n";
+print "Filtered tags: $no_cnt (distance $break_distance)\n";
+print "Final tags: $call_cnt \n"; 

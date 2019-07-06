@@ -1,0 +1,49 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Bio::DB::Sam;
+
+my $bamf;
+
+GetOptions(
+	'bam|b=s'=>\$bamf
+);
+
+my $bam=Bio::DB::Bam->open($bamf);
+our $header=$bam->header;
+my %hash;
+while(my $aln = $bam -> read1) {
+	my $seq_id=$aln->qname;
+	my @cat=split(/_/,$seq_id);
+	my $seqid=$cat[0];
+	my $seqflank=$cat[2];
+	my $seqsize=$cat[3];
+	my $seqsize2=$cat[4];
+	my $seqref=$header->target_name->[$aln->tid];
+	if($aln->tid < 0){$seqref="*"}
+	my $mref=$header->target_name->[$aln->mtid];
+	if($aln->mtid < 0){$mref="*"}
+	my $start=$aln->start;
+	if(!defined($start)){$start=0;}
+	my $end=$aln->end;
+	if(!defined($end)){$end=0;}
+	my $len=$aln->length;
+	if(!defined($len)){$len=0;}
+	my $mstart=$aln->mate_start;
+	if(!defined($mstart)){$mstart=0;}
+	my $mend=$aln->mate_end;
+	if(!defined($mend)){$mend=0;}
+	my $mlen=$aln->mate_len;
+	if(!defined($mlen)){$mlen=0;}
+	my $strand=$aln->strand;
+	my $size=$aln->isize;
+	my $cigar=$aln->cigar_str;
+	if($seqflank eq "LEFT"){
+		if($seqref eq $mref && $seqref ne "*"){
+			my @prt=($seqid,$seqflank,$seqsize,$seqsize2,$seqref,$start,$end,$len,$mref,$mstart,$mend,$mlen,$size);
+			print join("\t",@prt),"\n";
+		}
+	}
+}

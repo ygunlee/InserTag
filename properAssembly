@@ -1,0 +1,302 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use lib "$ENV{HOME}/insertag";
+
+use Pod::Usage;
+use Getopt::Long;
+use INSERTAG;
+use TOOLS;
+use Bio::SeqIO;
+use Bio::Seq;
+
+my $in;
+my $mq=-1;
+my $ln=-1;
+my $sp=0;
+my $ma;
+my $di;
+my $help=0;
+my $man=0;
+my $prefix="sample";
+my @anchor_chrom=(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,"X","Y");
+my %anchor_chrom=map{$_ =>1} @anchor_chrom;
+
+GetOptions(
+	'input|i=s' => \$in,
+	'qual|q=i' => \$mq,
+	'length|l=i' => \$ln,
+	'supporting|s=i' =>\$sp,
+	'prefix|p=s' =>\$prefix,
+	'masked' => \$ma,
+	'direction' => \$di,
+	'help|h' => \$help,
+	'man|m' => \$man
+) or pod2usage(2);
+
+pod2usage(1) if $help;
+pod2usage(1) unless $in;
+pod2usage(-verbose=>2) if $man;
+
+open(ASSEMBLY,$in);
+
+while(my $record = INSERTAG::getAFG(\*ASSEMBLY)){
+	my @contig=INSERTAG::getContig($record);
+	my @info=INSERTAG::getReads($record);
+	my @each=INSERTAG::getEach($record);
+	my $print=0; #0=not print // 1=print // 2=reverse-complement 
+	my $anchor_str=$info[3];
+	my $masked=$contig[4];
+	my $left=length($masked);
+	my $decoy=$each[8];
+	my $anchor_breakpoint=0;
+	my $anchor_start_p=1000000000000000;
+	my $anchor_end_p=-1;
+	
+	### PURE ANCHOR -> Not Print ### 
+	### contig[6] -> participating anchor number 
+	### contig[2] -> total participating number 
+	if($contig[6] == $contig[2]){$print=0; }
+
+	### PURE OVERHANG  
+	### contig[5] -> participating overhang number
+	### contig[2] -> total participating number 
+	elsif($contig[5] == $contig[2]){ 
+		my $sum=0;
+		$anchor_start_p=$each[3];
+		$anchor_end_p=$each[4];
+		foreach my $key (sort {$a<=>$b} keys %{$each[0]}){ 
+			my $str=$each[7]{$key}[1]; #0->100
+			my $size=abs($str); 
+			my $start=$each[7]{$key}[0]; #offset 
+			my $cigar=$each[7]{$key}[2];
+			$sum+=$each[0]{$key};
+			if($each[11]{$key}==1){
+				if($cigar =~ /^\d+S.*\d+S$/){next;}
+				my $clipping=0;
+				if($anchor_str==1){
+					if($cigar =~ /(\d+)S$/){$clipping=$1;}
+					if($clipping>0){
+						if($str<0){$size-=$clipping;}
+						elsif($str>0){$size-=$clipping;$start+=$clipping;}
+					}
+					if($each[10]{$key} > $anchor_end_p){
+						$anchor_end_p=$each[10]{$key};
+					}
+				}elsif($anchor_str==-1){
+					if($cigar =~ /^(\d+)S/){$clipping=$1;}
+					if($clipping>0){
+						if($str<0){$size-=$clipping;}
+						elsif($str>0){$size-=$clipping;$start+=$clipping;}
+					}
+					if($each[9]{$key} < $anchor_start_p){
+						$anchor_start_p=$each[9]{$key};
+					}
+				}
+				#substr($masked,$start,$size,"N" x $size);
+			}
+		}
+		if(abs($sum)==$contig[2]){
+			if($info[3]==1 && $sum>0){$print=2;}
+			elsif($info[3]==1 && $sum<0){$print=1;}
+			elsif($info[3]==-1 && $sum>0){$print=1;}
+			elsif($info[3]==-1 && $sum<0){$print=2;}
+		}
+	}
+
+	### COMBINED ANCHOR AND OVERHANG ASSEMBLY 
+	else{				#combined anchor and overhang
+		my $sum_odd=0;		#anchored reads, sum of direction 
+		my $sum_even=0;		#overhang reads, sum of direction
+		foreach my $key (sort {$a<=>$b} keys %{$each[0]}){ ###each[0] : counter_id -- assembly direction pair 
+			my $str=$each[7]{$key}[1]; #0->100
+			my $size=abs($str); 
+			my $start=$each[7]{$key}[0]; #offset 
+			my $cigar=$each[7]{$key}[2];
+			if($key % 2 == 1){	###if counter_id is odd number -> anchor read 
+				$sum_odd+=$each[0]{$key}; 
+				my $clipping=0;
+				if($start<0){$size-=abs($start);$start=0;}
+				if($each[9]{$key} < $anchor_start_p) {
+					$anchor_start_p = $each[9]{$key};
+				}
+				if($each[10]{$key} > $anchor_end_p){
+					$anchor_end_p = $each[10]{$key};
+				}
+				if($anchor_str==1){ 	#anchor +strand
+					if($cigar =~ /(\d+)S$/){$clipping=$1;}
+					if($clipping>0){
+						if($str<0){$size-=$clipping;$start+=$clipping;}
+						elsif($str>0){$size-=$clipping;}
+					}
+				}elsif($anchor_str==-1){ 	#anchor -strand 
+					if($cigar =~ /^(\d+)S/){$clipping=$1;}
+					if($clipping>0){
+						if($str>0){$size-=$clipping;}
+						elsif($str<0){$start+=$clipping;$size-=$clipping;}	
+					}
+				}
+				if($start+$size>$contig[3]){
+					$size=$contig[3]-$start;
+				}
+				if($size<0){$size=0;}
+				if($start>$contig[3]){$start=$contig[3];}
+				###MASKING 
+				substr($masked,$start,$size,"N" x $size);
+			}elsif($key % 2 == 0){ 	### if counter_id is even number -> overhang read 
+				$sum_even+=$each[0]{$key};
+				if($each[11]{$key}==9){ ## split-read 
+					if($cigar =~ /^\d+S.*\d+S$/){next;}
+					my $clipping=0;
+					if($start<0){$size-=abs($start);$start=0;}
+					if($anchor_str==1){
+						if($cigar =~ /(\d+)S$/){$clipping=$1;}
+						if($clipping>0){
+							if($str<0){$size-=$clipping;}
+							elsif($str>0){$size-=$clipping;$start+=$clipping;}
+							if($each[10]{$key} > $anchor_end_p){
+								$anchor_end_p=$each[10]{$key};
+							}
+						}
+					}elsif($anchor_str==-1){
+						if($cigar =~ /^(\d+)S/){$clipping=$1;}
+						if($clipping>0){
+							if($str<0){$size-=$clipping;}
+							elsif($str>0){$size-=$clipping;$start+=$clipping;}
+							if($each[9]{$key} < $anchor_start_p){
+								$anchor_start_p=$each[9]{$key};
+							}
+						}
+					}
+					if($clipping!=0){
+						if($start+$size>$contig[3]){
+							$size=$contig[3]-$start;
+						}
+						if($size<0){$size=0;}
+						if($start>$contig[3]){$start=$contig[3];}
+						#print $masked,"\t",$clipping,"\t",$each[11]{$key},"\n";
+						substr($masked,$start,$size,"N" x $size);
+					}
+				}
+			}
+		#print $key,"\t",$str,"\t",$size,"\t",$start,"\t",$cigar,"\t",$anchor_start_p,"\n";
+		}
+		my $count=$masked;
+		$count=~s/N//g;
+		$left=length($count);
+		if($left<=$ln){$print=0;} ##if all contigs were masked, out ! 
+		elsif($sum_odd*$sum_even>0){$print=0;} ##if much of anchor and overhang are same strand, out!
+		elsif(abs($sum_odd)==$contig[6] && abs($sum_even)==$contig[5]){ ##if any of anchor and overhang are same strand, out!
+			if($info[3]==1 && $sum_even>0){$print=2;}
+			elsif($info[3]==1 && $sum_even<0){$print=1;}
+			elsif($info[3]==-1 && $sum_even>0){$print=1;}
+			elsif($info[3]==-1 && $sum_even<0){$print=2;}
+		}
+
+	}
+	if($info[3] == 1) {$anchor_breakpoint=$anchor_end_p;}
+	elsif($info[3] == -1) {$anchor_breakpoint=$anchor_start_p;}
+
+	###########################################################
+	my $seq_object=Bio::Seq->new(-seq=>$contig[4]);
+	my $mask_object=Bio::Seq->new(-seq=>$masked);
+	my $happy=0; ##0 : unhappy // 1: happy // 2:no masking
+
+	if($masked=~/N/){
+		my @startp;
+		my @endp;
+		if($anchor_str == 1){ #anchor positive
+			if($print == 1){ #print sequence 
+				if($masked=~/^N/){
+					$happy=1;	
+				}
+			}elsif($print == 2){
+				if($mask_object->revcom()->seq=~/^N/){
+					$happy=1;	
+				}
+			}
+		}elsif($anchor_str == -1){
+			if($print == 1){
+				if($masked=~/N$/){
+					$happy=1;	
+				}
+			}elsif($print == 2){
+				if($mask_object->revcom()->seq=~/N$/){
+					$happy=1;	
+				}
+			}
+		}
+	}else{$happy=2;}
+
+	if($info[4] <= $mq){$print=0;}
+	if($ma){
+		if($left==$contig[3]){$print=0;}
+	}
+	if($di){
+		if($happy==0){$print=0;}
+	}
+	if($contig[2] < $sp){$print=0;}
+
+	if($info[0]=~/^chr(\w+)/){
+		$info[0]=$1;
+	}
+	my $input_chrom=$info[0];
+	if($info[0]=~/^chr(\w+)/){$input_chrom=$1;}
+	
+	#if(!defined($anchor_chrom{$info[0]})){$print=0;}
+	if(!defined($anchor_chrom{$input_chrom})){$print=0;}
+	my $sp_id=$prefix."_".$info[3]."_".$contig[0]."_".$contig[1];
+	
+	if($print == 1){
+		#my @loc=match_positions($masked);
+		#my $posit=match_positions($masked);
+		print join("\t",$info[0],$info[1],$info[2],$info[3],$info[4],$contig[2],$contig[5],$contig[6],
+			$each[6]->{0},$each[6]->{1},$each[6]->{2},$contig[0],$contig[1],$contig[3],$contig[4],$left,$masked,$sp_id,$happy,$anchor_breakpoint),"\n";
+		#print $posit,"\t",$anchor_start_p,"\t",$anchor_start_p+$posit-1,"\n";
+		#print join(@join,"\t");
+		#chr,min_loci,max_loci,strand,mean_quality,total_read,overhang_number,anchor_number,contig_length
+		#class[0],class[1],class[2],$cluster_ID,$sub_ID,contig_length,$contig_seq,$left_seq_length,$masked_seq
+
+	}elsif($print == 2){
+		#my $posit=match_positions($mask_object->revcom()->seq);
+		print join("\t",$info[0],$info[1],$info[2],$info[3],$info[4],$contig[2],$contig[5],$contig[6],
+			$each[6]->{0},$each[6]->{1},$each[6]->{2},$contig[0],$contig[1],$contig[3],$seq_object->revcom()->seq,$left,$mask_object->revcom()->seq,$sp_id,$happy,$anchor_breakpoint),"\n";
+		#print $posit,"\t",$anchor_end_p-$contig[3]+$posit,"\n";
+	#print $contig[0],"\t",$contig[1],"\t",$print,"\n";
+	#print "--------------------------------\n";
+	}
+}
+
+
+__END__
+
+=head1 NAME
+
+ properAssembly 
+
+=head1 DESCRIPTION
+
+ call proper assembled contigs with anchor masking
+
+=head1 OPTIONS
+
+ --input/-i		input assembly fire (required)
+ --qual/-q		minimum average mapping qualities of anchored reads
+ --length/-l		minimum length of unmasked contigs
+ --supporting/-s	minimum number of supporting reads of the contig
+ --masked 		only calling masked contigs
+ --direction		only calling properly masked contigs (with unmasked contigs)
+ --prefix/-p		prefix for specific ID generation (default="sample")
+ --help|h		help message
+ --man|m 		this message 
+
+=head1 DATE
+
+ 03-19-2017
+
+=head1 AUTHOR
+
+ Younggun Lee 
+
+ yglee08@gmail.com

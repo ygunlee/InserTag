@@ -1,0 +1,144 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Pod::Usage;
+use Getopt::Long;
+use Bio::DB::Sam;
+use Bio::Seq::Quality;
+use lib "$ENV{HOME}/insertag";
+
+use constant BASEQUALITY => 33;
+
+my $help=0;
+my $man=0;
+my $bamfile; 
+our $prefix="temp";
+
+our $min=5;
+our $dist=1000;
+our $minqual=10;
+
+GetOptions(
+        'bam|b=s' => \$bamfile,
+        'min|m=i' => \$min,
+	'dist|d=i' => \$dist,
+	'qual|q=i' => \$minqual,
+	'prefix|p=s' => \$prefix,
+        'help|h' => \$help,
+        'man' => \$man
+) or pod2usage(2);
+pod2usage(1) if $help;
+pod2usage(-verbose=>2) if $man;
+
+my $bam = Bio::DB::Bam -> open ($bamfile);
+my $outfile = $prefix.".unused.bam";
+my $outbam=Bio::DB::Bam -> open ($outfile,"w");
+our $header = $bam -> header;
+$outbam->header_write($header);
+open (my $TEMP,">$prefix.oabed");
+
+my $takeback=0;
+my $aln2;
+while(my $aln = $bam -> read1) {
+	if($aln -> paired){
+		if($takeback==0){
+			$aln2=$bam->read1;
+		}else{
+			my $aln3=$aln;
+			$aln=$aln2;
+			$aln2=$aln3;
+			$takeback=0;
+		}
+		if($aln->qname ne $aln2->qname){
+			if($aln->paired){
+				$outbam->write1($aln);
+			}
+			$takeback=1;
+			next;
+		}
+		
+		if($aln->proper_pair){
+			my $alnSoft=isSoftClip($aln);
+			my $aln2Soft=isSoftClip($aln2);
+				if($alnSoft>=$min){printPairedOabed($aln2,$aln,3)}
+				if($aln2Soft>=$min){printPairedOabed($aln,$aln2,3)}
+		}else{
+			my $alnMap=$aln->unmapped; # 0: mapped/ 1: unmapped
+			my $aln2Map=$aln2->unmapped; #0: mapped / 1: unmapped
+
+			if($alnMap==0 && $aln2Map==0){ # both mapped
+				my $alnChr=$header->target_name->[$aln->tid];
+				my $aln2Chr=$header->target_name->[$aln2->tid];
+				my $insert=abs($aln->isize);
+				if($alnChr ne $aln2Chr){
+				# inter-discordant with class2
+				printPairedOabed($aln,$aln2,2);
+				printPairedOabed($aln2,$aln,2);
+				}elsif($insert>=$dist){
+				# intra-discordant with class1
+				printPairedOabed($aln,$aln2,1);
+				printPairedOabed($aln2,$aln,1);
+				}
+			}elsif($alnMap==0 && $aln2Map==1){
+				# one-end anchored - mate unmapped with class 0
+				printPairedOabed($aln,$aln2,0);
+			}elsif($alnMap==1 && $aln2Map==0){
+				# one-end anchored - mate unmapped with class 0
+				printPairedOabed($aln2,$aln,0);
+			}elsif($alnMap==1 && $aln2Map==1){
+				# both reads are unmapped -> no use	
+			}
+		}
+	}
+}
+
+
+sub isSoftClip { # return the size of soft-clipping
+	my ($a)=@_;
+	my $cigarStr=$a->cigar_str;
+	if($cigarStr=~m/(\d+)S$/ || $cigarStr=~m/^(\d+)S/){
+		return $1;
+	}
+}
+
+sub printPairedOabed {
+	my ($a,$h,$class)=@_;
+
+	if ($a->qual < $minqual) {return;}
+
+	my $a_seq_object=Bio::Seq->new(-seq=>$a->qseq);
+	my $h_seq_object=Bio::Seq->new(-seq=>$h->qseq);
+	my $a_seq=$a_seq_object->seq;
+	my $h_seq=$h_seq_object->seq;
+
+
+	my $a_qual=join("",(map{chr $_ + BASEQUALITY} $a->qscore));
+	my $h_qual=join("",(map{chr $_ + BASEQUALITY} $h->qscore));
+
+	if($a->reversed){$a_seq=$a_seq_object->revcom()->seq; $a_qual=reverse($a_qual);}
+	if($h->reversed){$h_seq=$h_seq_object->revcom()->seq; $h_qual=reverse($h_qual);}
+	
+	if($h->unmapped){
+		print $TEMP 	# anchor information
+		$header->target_name->[$a->tid],"\t",$a->start,"\t",$a->end,"\t",
+		$a->qname,"\t",$a_seq,"\t",$a_qual,"\t",
+		$a->qual,"\t",$a->strand,"\t",$a->cigar_str,"\t",
+		# overhang information
+		$header->target_name->[$h->tid],"\t",0,"\t",0,"\t",
+		$h_seq,"\t",$h_qual,"\t",
+		$h->qual,"\t",$h->strand,"\t",abs($a->isize),"\t",0,"\t",
+		$class,"\n";
+	}else{
+		print $TEMP	# anchor information
+		$header->target_name->[$a->tid],"\t",$a->start,"\t",$a->end,"\t",
+		$a->qname,"\t",$a_seq,"\t",$a_qual,"\t",
+		$a->qual,"\t",$a->strand,"\t",$a->cigar_str,"\t",
+		# overhang information
+		$header->target_name->[$h->tid],"\t",$h->start,"\t",$h->end,"\t",
+		$h_seq,"\t",$h_qual,"\t",
+		$h->qual,"\t",$h->strand,"\t",abs($a->isize),"\t",$h->cigar_str,"\t",
+		$class,"\n";
+	}
+}

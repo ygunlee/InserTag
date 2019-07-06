@@ -1,0 +1,183 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+use lib "$ENV{HOME}/insertag";
+
+use Pod::Usage;
+use Getopt::Long;
+use INSERTAG;
+
+my $help=0;
+my $man=0;
+our $kmer=21;	# de-novo assembly k-mer
+our $min_length=1;	# minimum contig length
+our $sup_read=1;	# minimum supporting reads
+our $ind="temp";	# prefix id 
+my $input;	# input OABED with cluster id 
+
+GetOptions(
+	'kmer|k=i' => \$kmer,
+	'min_length|l=i' => \$min_length,
+	'sup_read|s=i' => \$sup_read,
+	'prefix|p=s' => \$ind,
+	'input|i=s' => \$input,
+	'help|h' => \$help,
+	'man|m' => \$man
+) or pod2usage(2);
+
+pod2usage(1) if $help;
+pod2usage(-verbose=>2) if $man;
+my $outfile=$ind.".assembly"; # outputfile
+open(OUT,">$outfile");
+
+my $counter=1;
+my %hash;
+
+open(OABED,$input);
+my $first_line=<OABED>;
+chomp $first_line;
+my @first_line=split(/\t/,$first_line);
+my $cid=$first_line[19];
+$hash{$counter}=$first_line;
+
+while(<OABED>){
+	chomp $_;
+	my $line=$_;
+	my @line=split(/\t/,$line);
+	if($line[19] == $cid){
+		$counter++;
+		$hash{$counter}=$line;
+	}elsif($line[19] == ($cid+1)){
+		if($counter < $sup_read){
+			%hash=();
+			$counter=1;
+			$hash{$counter}=$line;
+			$cid+=1;
+			next;
+		}else{
+			my %store;
+			my $cnt=0;
+			foreach my $key (sort {$a<=>$b} keys %hash){
+				$cnt++;
+				$store{$cnt}=INSERTAG::getOabed($hash{$key});
+				$cnt++;
+				$store{$cnt}=INSERTAG::getOabed($hash{$key});
+			}
+			local_assembly2(\%store,$cid);
+			%hash=();
+			$counter=1;
+			$hash{$counter}=$line;
+			$cid+=1;
+		}
+	}else{
+		print "\n";
+		print "cluster error\n";
+		print "aborted\n";
+		exit(1);
+	}
+}
+if($counter >= $sup_read){
+	my %store2;
+	my $cnt2=0;
+	foreach my $key2 (sort {$a<=>$b} keys %hash){
+		$cnt2++;
+		$store2{$cnt2}=INSERTAG::getOabed($hash{$key2});
+		$cnt2++;
+		$store2{$cnt2}=INSERTAG::getOabed($hash{$key2});
+	}
+	local_assembly2(\%store2,$cid);
+}
+
+sub local_assembly2{
+ my ($ref,$pid)=@_;
+ my %store=%$ref;
+ my $tag=1;
+ if(scalar (keys %store) >= 2){
+    my $filename1=">".$ind.".temp.".$pid.".1.fa";
+    my $filename2=">".$ind.".temp.".$pid.".2.fa";
+    my $out1=Bio::SeqIO->new(-file=>$filename1,-format=>'fasta');
+    my $out2=Bio::SeqIO->new(-file=>$filename2,-format=>'fasta');
+    foreach my $key (sort {$a<=>$b} keys %store){
+      if($key % 2 == 1) {
+        my $seq1=Bio::Seq->new(-seq=>$store{$key}->{ASEQ},-id=>$key);
+        $out1->write_seq($seq1);
+      }else{
+	my $seq2=Bio::Seq->new(-seq=>$store{$key}->{OSEQ},-id=>$key);
+	$out2->write_seq($seq2);
+      }
+    }
+    system("velveth $ind.Assem $kmer -shortPaired -separate -fasta $ind.temp.$pid.1.fa $ind.temp.$pid.2.fa > $ind.$pid.log");
+    system("velvetg $ind.Assem -ins_length 600 -exp_cov auto -cov_cutoff auto -min_contig_lgth $min_length -read_trkg yes -amos_file yes >$ind.$pid.log");
+
+    if(-s "$ind.Assem/velvet_asm.afg"){
+      open(AFG,"$ind.Assem/velvet_asm.afg");
+      while(my $record = INSERTAG::getAFG(\*AFG)){
+      my ($rec,$fields,$recs) = INSERTAG::parseAFG($record);
+      if($rec eq "CTG"){
+	my $total_overhang=0;
+	my $total_anchor=0;
+	my %subr;
+	foreach my $subread (@{$recs}){
+	  my ($srec, $sfields, $srecs)=INSERTAG::parseAFG($subread);
+	  $subr{$sfields->{src}}++;
+	  $store{$sfields->{src}}->{OOFFSET}=$sfields->{off};
+	  $store{$sfields->{src}}->{ODIRECT}=$sfields->{clr};
+	  if($sfields->{src} % 2 == 0){$total_overhang++;}
+	  if($sfields->{src} % 2 == 1){$total_anchor++;}
+	}
+	my $consensus=$fields->{seq};
+	$consensus=~s/\n//g;
+	
+        if($total_overhang >= $sup_read ) {
+	  my $contig_len=length($consensus);
+	  my $seq_num=scalar keys %subr;
+	  print OUT "{$pid","\n","{",$fields->{iid},"\n",$pid,"\t", $fields->{iid},"\t", $seq_num,"\t", $contig_len,"\t", 
+                    $consensus,"\t",$total_overhang,"\t",$total_anchor,"\n";
+	  foreach my $seq (sort {$a<=>$b} keys %subr){
+	    print OUT $store{$seq}->{ACHR},"\t",$store{$seq}->{ASTART},"\t",$store{$seq}->{AEND},"\t",$store{$seq}->{ASTR},"\t",
+                    $store{$seq}->{AMQ},"\t",$store{$seq}->{ACIGAR},"\t",$seq,"\t",$seq % 2,"\t",$store{$seq}->{OCHR},"\t",
+		    $store{$seq}->{OSTART},"\t",$store{$seq}->{OEND},"\t",$store{$seq}->{OCIGAR},"\t",$store{$seq}->{OSIZE},"\t",
+		    $store{$seq}->{OSTR},"\t",$store{$seq}->{OOFFSET},"\t",$store{$seq}->{ODIRECT},"\t",$store{$seq}->{OCLASS},"\n";
+	  }
+          print OUT "}\n}\n";
+	  $tag=0;
+	}
+      }
+      }
+    close (AFG);
+    }
+    #print "$pid cluster assembly step : done\n";
+    system("rm -f $ind.temp.$pid.1.fa");system("rm -f $ind.temp.$pid.2.fa");system("rm -f $ind.$pid.log");system("rm -rf $ind.Assem");
+  }
+}
+	
+				
+
+__END__
+
+=head1 NAME
+
+<laaps11.pl> - < local assembly of cluster tagged oabed file>
+
+=head1 DESCRIPTION
+
+generates local assembly of overhang reads of clustered oabeds.
+
+de-novo assembly of each cluster is done by velvet.
+
+=head1 OPTIONS
+
+	-i / --input  		: input assembly file 
+	-k / --kmer 		: kmer of velvet
+	-l / --min_length	: minimum length of contigs 
+	-s / --sup_read		: minimum supporting reads
+	-p / --prefix		: prefix of output files
+
+=head1 AUTHOR
+
+<Younggun Lee>
+
+<yglee08@gmail.com>
+
+<leeyogun@yonsei.ac.kr>
+

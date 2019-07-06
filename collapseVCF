@@ -1,0 +1,254 @@
+#!/usr/bin/perl
+#perl script to collapse InserTag vcf file
+#Author: Younggun Lee
+#Date: 04/23/2017
+
+use strict;
+use warnings;
+use lib "$ENV{HOME}/insertag";
+use Getopt::Long;
+use BLAT;
+use INSERTAG;
+use Time::Piece;
+
+my $infile;
+my $pairfile;
+my $singlefile;
+my $prefix="temp";
+my $gap=300;
+my $overlap=50;
+my $sample;
+my $current_date=localtime->strftime('%m/%d/%Y');
+my $help=0;
+my $header2="##fileCollapse=$current_date\n";
+my $header3="#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tTAG\tPOS2\tID2\tMQ2\tFILTER2\tFORMAT2\tTAG2\tPAIR\n";
+
+GetOptions(
+ "in|i=s" => \$infile,
+ "gap|g=i" => \$gap,
+ "overlap|o=i" => \$overlap,
+ "sample|s=s" => \$sample,
+ "pair|po=s" => \$pairfile,
+ "single|so=s" => \$singlefile,
+ "prefix|p=s" => \$prefix,
+ "help|h" => \$help
+);
+
+if($help==1){
+ print "\nDESC: collapse InserTag VCF file\n";
+ print "Usage: collapseVCF \n -i <insertag.vcf> \n -g <deletion gap bp> \n -o <overlap bp> \n -po <pair output> \n -so <single output> \n -p <prefix> \n";
+ print "Optional: -s <sample name> \n";
+ print "Author: Younggun Lee (yglee08\@gmail.com)\n";
+ print "Date: 04/23/2017\n\n";
+ exit(1);
+}
+if(!defined($infile)){print "\ninput VCF file needed\nHelp: collpaseVCF -h\n\n";exit(1);}
+if(!defined($pairfile) || !defined($singlefile)){print "\noutput files needed\nHelp: collpaseVCF -h\n\n";}
+open(IN,"<$infile") || die print "\nCan't open input VCF file $infile\n\n";
+my $delfile=$pairfile.".deletion";
+open(DEL,">$delfile");
+open(PAIR,">$pairfile");
+open(SINGLE,">$singlefile");
+my %name=(
+ "chr1"=>1,"chr2"=>2,"chr3"=>3,"chr4"=>4,"chr5"=>5,"chr6"=>6,"chr7"=>7,"chr8"=>8,"chr9"=>9,"chr10"=>10,
+ "chr11"=>11,"chr12"=>12,"chr13"=>13,"chr14"=>14,"chr15"=>15,"chr16"=>16,"chr17"=>17,"chr18"=>18,"chr19"=>19,"chr20"=>20,
+ "chr21"=>21,"chr22"=>22,"chrX"=>23,"chrY"=>24,"X"=>23,"Y"=>24,"chrMT"=>25,"MT"=>25);
+my $lflankh;
+my $rflankh;
+my $header;
+my $header1;
+my $line_num=0;
+while(<IN>){
+	my $line=$_;
+	if($line=~/^\#\#fileDate/){$header.=$line;$header.=$header2;next;}
+	if($line=~/^#CHROM/){$header1=$line;next;}
+	if($line=~/^\#/){$header.=$line;next;}
+	chomp $line;
+	$line_num++;
+	my @line=split(/\t/,$line);
+	my $hchr=$line[0];
+	if($name{$hchr}){$hchr=$name{$hchr}};
+	my $hpos=$line[1];
+	my $hflank=$line[6];
+        my $hid=$line[2];
+	if($hflank eq "LEFT_F"){$lflankh->{$hchr}->{$hpos}->{$hid}=\@line;}
+	elsif($hflank eq "RIGHT_F"){$rflankh->{$hchr}->{$hpos}->{$hid}=\@line;}
+}close(IN);
+my $aln_count=0;
+my $no_count=0;
+my $sin_count=0;
+my $del_count=0;
+
+print PAIR $header,$header3;
+print SINGLE $header,$header1;
+
+my $right_paired;
+foreach my $chr (sort {$a<=>$b} keys %{$lflankh}){
+ foreach my $pos (sort {$a<=>$b} keys %{$lflankh->{$chr}}){
+  foreach my $id (keys %{$lflankh->{$chr}->{$pos}}){
+   my $print_status=0;
+   my $ltag=$lflankh->{$chr}->{$pos}->{$id};
+   ##SEARCH_START
+   for (my $i= $pos-$overlap; $i < $pos+$gap; $i++){
+   if(defined($rflankh->{$chr}->{$i})){
+    my $interval=$i-$pos;
+    foreach my $rid (keys %{$rflankh->{$chr}->{$i}}){
+      $right_paired->{$chr}->{$i}->{$rid}++;
+      my $rtag=$rflankh->{$chr}->{$i}->{$rid};
+      if($sample){
+	if($ltag->[8] ne $sample && $rtag->[8] ne $sample){next;}
+      }
+      $ltag->[7]=~/BRK\=(\d+)/; my $lfbrk=$1;
+      $rtag->[7]=~/BRK\=(\d+)/; my $rfbrk=$1;
+      my $hitinfo=BLAT::runblat_contig($ltag->[9],$rtag->[9],$prefix);
+      ##ALIGNED? UN-ALIGNED?
+      ##UN-ALIGNED
+      if($hitinfo==0){$print_status=1;
+       print PAIR pairCall($ltag,$rtag,1),"\n";
+       $no_count++;
+      }
+      ##ALIGNED
+      else{my @hitstatus=properHit($hitinfo,$lfbrk,$rfbrk);
+       $print_status=$hitstatus[0];
+       if($print_status==4){
+	print DEL pairCallDEL($ltag,$rtag,\@hitstatus),"\n";
+	$del_count++;
+       }else{
+        print PAIR pairCallPSL($ltag,$rtag,\@hitstatus),"\n";
+        $aln_count++;
+       }
+      }
+     }
+    }
+   }
+  ##SEARCH_END
+  if($print_status!=0){delete $lflankh->{$chr}->{$pos}->{$id};}
+  }
+  }
+ ##position out
+}
+
+my $single;
+foreach my $chr (sort {$a<=>$b} keys %{$lflankh}){
+ foreach my $pos (sort {$a<=>$b} keys %{$lflankh->{$chr}}){
+  foreach my $id (keys %{$lflankh->{$chr}->{$pos}}){
+   $single->{$chr}->{$pos}->{$id}=$lflankh->{$chr}->{$pos}->{$id};
+}}}
+foreach my $chr (sort {$a<=>$b} keys %{$rflankh}){
+ foreach my $pos (sort {$a<=>$b} keys %{$rflankh->{$chr}}){
+  foreach my $id (keys %{$rflankh->{$chr}->{$pos}}){
+   if(!$right_paired->{$chr}->{$pos}->{$id}){
+    $single->{$chr}->{$pos}->{$id}=$rflankh->{$chr}->{$pos}->{$id};
+}}}}
+
+foreach my $chr (sort {$a<=>$b} keys %{$single}){
+ foreach my $pos (sort {$a<=>$b} keys %{$single->{$chr}}){
+  foreach my $id (sort keys %{$single->{$chr}->{$pos}}){
+   print SINGLE join("\t",@{$single->{$chr}->{$pos}->{$id}}),"\n";
+   $sin_count++;
+}}}
+   
+print "\n VCF file collapse was finished\n";
+print "Total InserTag: $line_num\n";
+print "Putative insertion with alignement: $aln_count\n";
+print "Putative insertion without alignement: $no_count\n";
+print "Single InserTag: $sin_count\n";
+print "Deletion call: $del_count\n";
+print "$current_date\n";
+print "\n";
+
+close(PAIR);
+close(SINGLE);
+close(DEL);
+
+sub properHit{
+	my ($hit,$left_brk,$right_brk)=@_;
+	my $hit_match=$hit->[0];
+	my $hit_mismatch=$hit->[1];
+	my $hit_left_insert=$hit->[4];
+	my $hit_left_insert_size=$hit->[5];
+	my $hit_right_insert=$hit->[6];
+	my $hit_right_insert_size=$hit->[7];
+	my $hit_left_str=$hit->[8];
+	my $hit_left_size=$hit->[10];
+	my $hit_left_start=$hit->[11];
+	my $hit_left_end=$hit->[12];
+	my $hit_right_size=$hit->[14];
+	my $hit_right_start=$hit->[15];
+	my $hit_right_end=$hit->[16];
+	my $hit_block=$hit->[17];
+	my $hit_block_size=$hit->[18];
+	
+	my $proper=6; #2=proper / 3=complex / 4=deletion / 5=non-sense(single) / 6=error
+	my $new_right_brk=$hit_left_size + ($right_brk - $hit_right_end);
+	my $insertion_size=$new_right_brk - $left_brk;
+	if($hit_left_str eq "-"){$proper=5;}
+	elsif($hit_block > 1){$proper=3;}
+	else{
+		#my $right_over=$hit_right_size - $hit_right_end;
+		#$insertion_size=$new_right_brk - $left_brk;
+		if($insertion_size<=0){$proper=4;}
+		else{$proper=2;}
+	}
+	my @out=($proper,$insertion_size,$hit_right_end,$new_right_brk);
+	return @out;
+}
+
+#0=single 1=unaligned 2=aligned 3=complex 4=deletion 5=non-sense 6=error 
+sub pairCall{
+	my ($ltagl,$rtagr,$status)=@_; 
+	my @slice=(@$ltagl,@$rtagr[1,2,5,6,7,8,9]);
+	my $psl_info="";
+	my $pair_interval=$rtagr->[1] - $ltagl->[1];
+	if($status==1){$psl_info="PAIRTYPE=UNALIGNED;";}
+	$psl_info.="PAIRGAP=$pair_interval";
+	push(@slice,$psl_info);
+	my $print=join("\t",@slice);
+	return $print;
+}
+
+sub pairCallPSL{
+	my ($ltagl,$rtagr,$properHitresult)=@_; 
+	my $status=$properHitresult->[0];
+	my $size=$properHitresult->[1];
+	my $hit_end=$properHitresult->[2];
+	my $new_end=$properHitresult->[3];
+	my @slice=(@$ltagl,@$rtagr[1,2,5,6,7,8,9]);
+	my $psl_info="";
+	my $pair_interval=$rtagr->[1] - $ltagl->[1];
+	if($status==0 || $status==6){return;}
+	elsif($status==3 || $status==5){$psl_info="PAIRTYPE=COMPLEX;";}
+	elsif($status==2){
+		my $lseq=$ltagl->[9];
+		my $rseq=$rtagr->[9];
+		my $rover=substr($rseq,$hit_end,length($rseq));
+		my $teg=$lseq.$rover;
+      		$ltagl->[7]=~/BRK\=(\d+)/; 
+		my $lfbrk=$1;
+		my $seg=substr($teg,$lfbrk,$new_end-$lfbrk);
+		$psl_info="PAIRTYPE=ALIGNED;SEGSIZE=$size;SEGSEQ=$seg;HITEND=$hit_end;";
+	}elsif($status==4){
+		$psl_info="PAIRTYPE=DELETION;SEGSIZE=$size;HITEND=$hit_end;";
+		$slice[4]="<DEL>";	
+	}
+	$psl_info.="PAIRGAP=$pair_interval";
+	push(@slice,$psl_info);
+	my $print=join("\t",@slice);
+	return $print;
+}
+
+sub pairCallDEL {
+	my ($ltagl,$rtagr,$properHitresult)=@_; 
+	my $status=$properHitresult->[0];
+	my $size=$properHitresult->[1];
+	my $hit_end=$properHitresult->[2];
+	my $new_end=$properHitresult->[3];
+	my @slice=(@$ltagl,@$rtagr[1,2,5,6,7,8,9]);
+	my $pair_interval=$rtagr->[1] - $ltagl->[1];
+	my $psl_info="PAIRTYPE=DELETION;SEGSIZE=$size;HITEND=$hit_end;";
+	$slice[4]="<DEL>";	
+	$psl_info.="PAIRGAP=$pair_interval";
+	push(@slice,$psl_info);
+	my $print=join("\t",@slice);
+	return $print;
+}

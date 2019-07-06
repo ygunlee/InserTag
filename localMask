@@ -1,0 +1,135 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+use lib "$ENV{HOME}/insertag";
+
+use Pod::Usage;
+use Getopt::Long;
+use INSERTAG;
+use TOOLS;
+use Bio::SeqIO;
+use Bio::Seq;
+
+my $in;
+my $ref;
+my $temp="temp";
+my $extend=1000;
+my $min=100;
+
+GetOptions(
+	'input|i=s' => \$in,
+	'ref|r=s' => \$ref,
+	'temp|t=s' => \$temp,
+	'extend|e=i' => \$extend,
+	'min|m=i' => \$min
+);
+
+my $aligner=Blat->new(-PRG=>"blat",-OPTIONS=>" -tileSize=15 -stepSize=1 -out=blast8 -minScore=15 -noHead ");
+my $outfile1=">$temp.output";
+my $outfile2=">$temp.output.trkg";
+#open(OUTPUT,$outfile1);
+#open(TRKG,$outfile2);
+open(CALL,$in);
+
+while(my $record = <CALL>){
+	chomp $record;
+	my @call=split("\t",$record);
+
+	my $pf=Bio::SeqIO->new(-file=>">$temp.contig.tmp.fa",-format=>'fasta');
+	my $ps=Bio::Seq->new(-seq=>$call[14],-id=>$call[17]);
+	$pf->write_seq($ps);
+
+	my $start=$call[1];
+	my $end=$call[2];
+
+	if($call[3]==1){
+		$end+=$extend;	
+	}else{
+		$start-=$extend;
+	}
+	
+	my $loci=$call[0].":".$start."-".$end;
+
+	if($loci!~/^chr(.*)/){$loci="chr".$loci;}
+	system("samtools faidx $ref $loci > $temp.ref.tmp.fa");
+
+	$aligner->run(-TARGET=>"$temp.ref.tmp.fa",-QUERY=>"$temp.contig.tmp.fa",
+				-OUTPUT=>"$temp.blat8");
+	open(BLAT,"$temp.blat8");
+	my $seq=$call[16];
+	my $i=0; #for storaging
+	my $j=0; #for masking
+	my %blast; ##blast store in hash
+
+	my $leftmost=$call[13]; 
+	my $rightmost=0;
+	my $leftfu=0;
+	my $rightfu=0;
+
+	while(my $hit=<BLAT>){
+		$i++;
+		$j++;
+		if($j>9){$j=9;}
+		my @hit=INSERTAG::getBLAST8($hit); 
+		#(0)identity (1)aln_length (2)query_start (3)query_end (4)target_start (5)target_end (6)target_name
+		$seq=INSERTAG::maskContig($seq,$hit[2],$hit[3],$j);
+		if($hit[2] < $leftmost){$leftmost=$hit[2]; $leftfu=$j;}
+		if($hit[3] > $rightmost){$rightmost=$hit[3]; $rightfu=$j;}
+		$blast{$i}=\@hit;
+	}
+	
+	my @list=($seq=~/(\d+)/g);
+	my $num=0;
+	for my $frag(@list){
+		$num+=length($frag);
+	}
+
+	my $brk=0;
+	my $print=0;
+	my $tag=$call[16];
+
+	if($i==0){	#no masked 
+		$print=1;	
+		$seq="*";
+		$tag=~s/N+//g;
+	}else{		#masked 
+		if($call[3] == 1){
+			if($call[13]-$rightmost >=$min){
+				$blast{$rightfu}[7]=~/^chr(\d+|X|Y):(\d+)-(\d+)$/;
+				my $st=$2; 
+				if($blast{$rightfu}[4]>$blast{$rightfu}[5]){
+					$brk=$st+$blast{$rightfu}[5];	
+				}else{
+					$brk=$st+$blast{$rightfu}[4];
+				}
+				$print=1;
+				$seq=~/(\D+)$/;
+				$tag=$1;
+			}
+		}elsif($call[3] == -1){
+			if($leftmost-1 >= $min){
+				$blast{$leftfu}[7]=~/^chr(\d+|X|Y):(\d+)-(\d+)$/;
+				my $st=$2; 
+				if($blast{$leftfu}[4]>$blast{$leftfu}[5]){
+					$brk=$st+$blast{$leftfu}[5];	
+				}else{
+					$brk=$st+$blast{$leftfu}[4];
+				}
+				$print=1;
+				$seq=~/^(\D+)/;
+				$tag=$1;
+			}
+		}
+	}
+	if($print==1){
+		print join("\t",$record,$brk,$seq,$tag,length($tag)),"\n";
+	}
+	#print OUTPUT join("\t",@call),"\t",$num,"\t",$seq,"\n"; ##num=masking number / seq=masked sequence
+	#print TRKG join("\t",@call),"\t",$num,"\t",$seq,"\t",join(",",@trkg),"\n";
+	#print join("\t",@call),"\t",$num,"\t",$seq,"\n"; ##num=masking number / seq=masked sequence
+	#print join("\t",@call),"\t",$num,"\t",$seq,"\t",join(",",@trkg),"\n";
+	#}else{
+	#	print "OUT\n";
+	#}
+	system("rm $temp.ref.tmp.fa $temp.contig.tmp.fa $temp.blat8");
+}
